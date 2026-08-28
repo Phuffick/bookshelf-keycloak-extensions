@@ -1,0 +1,89 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '9.0.0'
+    id 'maven-publish'
+}
+
+group = 'com.jupiter.bookshelf'
+version = providers.gradleProperty('version').getOrElse('0.1.0-SNAPSHOT')
+description = 'Bookshelf Keycloak extensions - server-side providers (event listeners, mappers, ...) packaged as one jar for /opt/keycloak/providers/'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+ext {
+    keycloakVersion = '26.1.4'
+    kafkaVersion = '4.1.1'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Provided by the Keycloak distribution at runtime - never bundle these.
+    compileOnly "org.keycloak:keycloak-server-spi:${keycloakVersion}"
+    compileOnly "org.keycloak:keycloak-server-spi-private:${keycloakVersion}"
+    compileOnly "org.keycloak:keycloak-core:${keycloakVersion}"
+
+    // Not provided by Keycloak - shaded into the provider jar. Drop transitive libs we do not use:
+    //  - slf4j-api is provided by the Keycloak/Quarkus runtime (bundling a second copy clashes)
+    //  - lz4 / snappy / zstd are only needed for producer-side compression, which we don't enable
+    implementation("org.apache.kafka:kafka-clients:${kafkaVersion}") {
+        exclude group: 'org.slf4j', module: 'slf4j-api'
+        exclude group: 'org.lz4', module: 'lz4-java'
+        exclude group: 'org.xerial.snappy', module: 'snappy-java'
+        exclude group: 'com.github.luben', module: 'zstd-jni'
+    }
+    compileOnly "org.slf4j:slf4j-api:2.0.16"
+
+    testImplementation "org.keycloak:keycloak-server-spi:${keycloakVersion}"
+    testImplementation "org.keycloak:keycloak-server-spi-private:${keycloakVersion}"
+    testImplementation "org.keycloak:keycloak-core:${keycloakVersion}"
+    testImplementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
+    testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
+    testImplementation "org.mockito:mockito-core:5.14.2"
+    testImplementation "org.assertj:assertj-core:3.27.3"
+    testImplementation "com.fasterxml.jackson.core:jackson-databind:2.18.2"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+tasks.named('shadowJar') {
+    archiveClassifier = 'all'
+    // kafka-clients ships META-INF/services/* (serializers, config providers); keep them merged
+    // alongside our own org.keycloak.events.EventListenerProviderFactory service file.
+    mergeServiceFiles()
+}
+
+// The shaded "-all" jar is what the Keycloak image build pulls; make `build` produce it.
+tasks.named('build') {
+    dependsOn tasks.named('shadowJar')
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            artifactId = 'bookshelf-keycloak-extensions'
+            artifact tasks.named('shadowJar')
+            artifact tasks.named('sourcesJar')
+        }
+    }
+    repositories {
+        maven {
+            name = 'GitHubPackages'
+            url = uri('https://maven.pkg.github.com/Phuffick/bookshelf-keycloak-extensions')
+            credentials {
+                username = System.getenv('GITHUB_ACTOR')
+                password = System.getenv('GH_PACKAGES_TOKEN') ?: System.getenv('GITHUB_TOKEN')
+            }
+        }
+    }
+}
